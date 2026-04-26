@@ -2,14 +2,14 @@ name: Life Ops Event Scraper
 
 on:
   schedule:
-    - cron: "0 6 * * 1"   # Every Monday at 6:00 AM UTC
-  workflow_dispatch:        # Manual trigger for testing
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
 
 jobs:
   scrape:
     runs-on: ubuntu-latest
     permissions:
-      contents: write       # Required to commit updated processed_events.json
+      contents: write
 
     steps:
       - name: Checkout repository
