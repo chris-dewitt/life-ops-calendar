@@ -1,7 +1,7 @@
 import logging
 import sys
 
-from pipeline.deduplicator import filter_new
+from pipeline.deduplicator import commit_ledger, filter_new
 from pipeline.dispatcher import dispatch, send_error
 from pipeline.minimizer import minimize
 from scrapers import ALL_SCRAPERS
@@ -17,7 +17,7 @@ log = logging.getLogger(__name__)
 def main() -> None:
     raw_events: list[dict] = []
 
-    # Module A: Scrape each source independently so one failure doesn't kill the rest
+    # Module A: scrape each source independently — one failure never stops the rest
     for ScraperClass in ALL_SCRAPERS:
         name = ScraperClass.__name__
         try:
@@ -31,14 +31,17 @@ def main() -> None:
 
     try:
         minimized = minimize(raw_events)
-        new_events = filter_new(minimized)
+        new_events, new_hashes = filter_new(minimized)
         log.info("New events after deduplication: %d", len(new_events))
 
-        if new_events:
-            dispatch(new_events)
-            log.info("Dispatch complete.")
-        else:
+        if not new_events:
             log.info("No new events to dispatch.")
+            return
+
+        # Dispatch first — only commit ledger on success so failed runs are retried
+        dispatch(new_events)
+        commit_ledger(new_hashes)
+        log.info("Dispatch complete. Ledger updated with %d new hashes.", len(new_hashes))
 
     except Exception as exc:
         msg = f"Pipeline failed: {exc}. Check GitHub logs."

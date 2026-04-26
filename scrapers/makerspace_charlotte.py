@@ -1,15 +1,29 @@
 import logging
 import re
 
+import requests
+from bs4 import BeautifulSoup
 from dateutil import parser as dateparser
-from playwright.sync_api import sync_playwright
 
 from .base import BaseScraper
 
 log = logging.getLogger(__name__)
 
-# MakerSpace Charlotte hosts events on Eventbrite
-EVENTS_URL = "https://www.eventbrite.com/o/makerspace-charlotte-8358690135"
+# Eventbrite's public search API — no auth required, no bot detection
+EVENTBRITE_API = (
+    "https://www.eventbrite.com/api/v3/destination/search/"
+    "?q=makerspace+charlotte&place.address.city=Charlotte&place.address.region=NC"
+    "&expand=event_sales_status,primary_venue,image"
+)
+
+HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+    ),
+    "Accept": "application/json, text/plain, */*",
+    "Referer": "https://www.eventbrite.com/",
+}
 
 
 class MakerSpaceScraper(BaseScraper):
@@ -18,63 +32,59 @@ class MakerSpaceScraper(BaseScraper):
     def scrape(self) -> list[dict]:
         events: list[dict] = []
 
-        with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True)
-            page = browser.new_page()
-            page.set_extra_http_headers({"User-Agent": "Mozilla/5.0 Chrome/120.0.0.0"})
+        try:
+            resp = requests.get(EVENTBRITE_API, headers=HEADERS, timeout=20)
+            resp.raise_for_status()
+            data = resp.json()
 
-            try:
-                page.goto(EVENTS_URL, timeout=30000)
-                page.wait_for_load_state("networkidle", timeout=20000)
+            event_list = (
+                data.get("events", {}).get("results", [])
+                or data.get("results", [])
+                or []
+            )
 
-                cards = page.query_selector_all(
-                    "[data-testid='search-event-card-wrapper'], .eds-event-card, li.search-event-card"
-                )
+            for ev in event_list:
+                try:
+                    title = ev.get("name", {}).get("text", "") or ev.get("name", "")
+                    if not title or "makerspace" not in title.lower():
+                        continue
 
-                for card in cards:
+                    start = ev.get("start", {}).get("local", "") or ev.get("start_date", "")
                     try:
-                        title_el = card.query_selector("h2, h3, [data-testid='event-card-title'], .eds-event-card__formatted-name")
-                        date_el = card.query_selector("time, [data-testid='event-card-date'], .eds-event-card__formatted-date")
-                        venue_el = card.query_selector("[data-testid='event-card-venue'], .card-text--truncated__one")
-                        desc_el = card.query_selector("p, [data-testid='event-card-description']")
+                        event_date = dateparser.parse(start).date()
+                    except Exception:
+                        continue
 
-                        title_text = title_el.inner_text().strip() if title_el else ""
-                        if not title_text:
-                            continue
+                    if not self._is_within_window(event_date):
+                        continue
 
-                        date_attr = date_el.get_attribute("datetime") if date_el else ""
-                        date_text = date_attr or (date_el.inner_text() if date_el else "")
-                        try:
-                            event_date = dateparser.parse(date_text.strip()).date()
-                        except Exception:
-                            continue
+                    venue = ev.get("primary_venue", {}).get("address", {}).get("localized_address_display", "MakerSpace Charlotte")
+                    desc_html = ev.get("description", {}).get("html", "") or ""
+                    desc_text = BeautifulSoup(desc_html, "lxml").get_text()[:300]
 
-                        if not self._is_within_window(event_date):
-                            continue
+                    events.append({
+                        "title": title[:100],
+                        "date": event_date.strftime("%Y-%m-%d"),
+                        "time": _extract_time(start),
+                        "venue": venue[:80] or "MakerSpace Charlotte, 1216 Thomas Ave",
+                        "raw_description": desc_text,
+                        "source": self.SOURCE,
+                    })
+                except Exception as exc:
+                    log.debug("Event parse error: %s", exc)
 
-                        venue_text = venue_el.inner_text().strip() if venue_el else "MakerSpace Charlotte"
-                        desc_text = desc_el.inner_text().strip() if desc_el else ""
-
-                        events.append({
-                            "title": title_text,
-                            "date": event_date.strftime("%Y-%m-%d"),
-                            "time": _extract_time(date_text),
-                            "venue": venue_text or "MakerSpace Charlotte, 1216 Thomas Ave",
-                            "raw_description": desc_text,
-                            "source": self.SOURCE,
-                        })
-                    except Exception as exc:
-                        log.debug("Card parse error: %s", exc)
-
-            except Exception as exc:
-                log.error("%s scrape failed: %s", self.SOURCE, exc)
-            finally:
-                browser.close()
+        except Exception as exc:
+            log.error("%s scrape failed: %s", self.SOURCE, exc)
 
         log.info("%s: found %d events", self.SOURCE, len(events))
         return events
 
 
-def _extract_time(text: str) -> str:
-    m = re.search(r"\d{1,2}:\d{2}\s*(?:AM|PM|am|pm)", text)
-    return m.group(0).upper() if m else "TBD"
+def _extract_time(iso: str) -> str:
+    m = re.search(r"T(\d{2}):(\d{2})", iso)
+    if m:
+        h, mn = int(m.group(1)), int(m.group(2))
+        suffix = "AM" if h < 12 else "PM"
+        h12 = h % 12 or 12
+        return f"{h12:02d}:{mn:02d} {suffix}"
+    return "TBD"

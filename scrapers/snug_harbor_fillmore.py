@@ -1,27 +1,30 @@
 import logging
 import re
 
+import requests
+from bs4 import BeautifulSoup
 from dateutil import parser as dateparser
-from playwright.sync_api import sync_playwright
 
 from .base import BaseScraper
 
 log = logging.getLogger(__name__)
 
-# Fillmore Charlotte uses Live Nation's venue events page
-# Snug Harbor Charlotte uses Eventbrite
-VENUES = [
-    {
-        "name": "The Fillmore Charlotte",
-        "url": "https://www.livenation.com/venue/KovZ917AJb6/the-fillmore-charlotte-events",
-        "address": "The Fillmore Charlotte, 820 Hamilton St, Charlotte NC",
-    },
-    {
-        "name": "Snug Harbor Charlotte",
-        "url": "https://www.eventbrite.com/o/snug-harbor-charlotte-26218596921",
-        "address": "Snug Harbor, Charlotte NC",
-    },
-]
+HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+    ),
+}
+
+# Fillmore Charlotte — Ticketmaster venue search (JSON endpoint)
+FILLMORE_URL = (
+    "https://app.ticketmaster.com/discovery/v2/events.json"
+    "?venueId=KovZpZAEdFaA&countryCode=US&size=20&sort=date,asc"
+    "&apikey=DpFMzKt3UazBFMnqthqBjIKqiHROvBKo"
+)
+
+# Snug Harbor Charlotte — use their Songkick page (public, no auth)
+SNUG_URL = "https://www.songkick.com/venues/4036864-snug-harbor/calendar"
 
 
 class SnugHarborFillmoreScraper(BaseScraper):
@@ -29,68 +32,92 @@ class SnugHarborFillmoreScraper(BaseScraper):
 
     def scrape(self) -> list[dict]:
         events: list[dict] = []
-
-        with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True)
-
-            for venue in VENUES:
-                page = browser.new_page()
-                page.set_extra_http_headers({"User-Agent": "Mozilla/5.0 Chrome/120.0.0.0"})
-                try:
-                    page.goto(venue["url"], timeout=30000)
-                    page.wait_for_load_state("domcontentloaded", timeout=20000)
-                    page.wait_for_timeout(3000)
-
-                    # Eventbrite organizer page
-                    if "eventbrite" in venue["url"]:
-                        cards = page.locator(
-                            "[data-testid='search-event-card-wrapper'], .eds-event-card, li.search-event-card"
-                        ).all()
-                    else:
-                        # Live Nation venue page
-                        cards = page.locator(
-                            "[data-testid='event-card'], .event-card, article[class*='event']"
-                        ).all()
-
-                    for card in cards:
-                        try:
-                            title_el = card.locator("h2, h3, [data-testid='event-card-title'], [class*='title']").first
-                            date_el = card.locator("time, [data-testid='event-card-date'], [class*='date']").first
-
-                            title_text = title_el.inner_text().strip() if title_el.count() else ""
-                            if not title_text:
-                                continue
-
-                            date_attr = date_el.get_attribute("datetime") if date_el.count() else ""
-                            date_text = date_attr or (date_el.inner_text() if date_el.count() else "")
-                            try:
-                                event_date = dateparser.parse(date_text.strip()).date()
-                            except Exception:
-                                continue
-
-                            if not self._is_within_window(event_date):
-                                continue
-
-                            events.append({
-                                "title": title_text[:100],
-                                "date": event_date.strftime("%Y-%m-%d"),
-                                "time": _extract_time(date_text),
-                                "venue": venue["address"],
-                                "raw_description": "",
-                                "source": self.SOURCE,
-                            })
-                        except Exception as exc:
-                            log.debug("Card parse error (%s): %s", venue["name"], exc)
-
-                except Exception as exc:
-                    log.error("%s (%s) scrape failed: %s", self.SOURCE, venue["name"], exc)
-                finally:
-                    page.close()
-
-            browser.close()
-
+        events.extend(_scrape_fillmore(self._is_within_window))
+        events.extend(_scrape_snug(self._is_within_window))
         log.info("%s: found %d events", self.SOURCE, len(events))
         return events
+
+
+def _scrape_fillmore(in_window) -> list[dict]:
+    results = []
+    try:
+        resp = requests.get(FILLMORE_URL, headers=HEADERS, timeout=20)
+        resp.raise_for_status()
+        data = resp.json()
+        for ev in data.get("_embedded", {}).get("events", []):
+            try:
+                title = ev.get("name", "")
+                start = ev.get("dates", {}).get("start", {}).get("localDate", "")
+                time_str = ev.get("dates", {}).get("start", {}).get("localTime", "")
+                if not title or not start:
+                    continue
+                event_date = dateparser.parse(start).date()
+                if not in_window(event_date):
+                    continue
+                results.append({
+                    "title": title[:100],
+                    "date": event_date.strftime("%Y-%m-%d"),
+                    "time": _fmt_time(time_str),
+                    "venue": "The Fillmore Charlotte, 820 Hamilton St, Charlotte NC",
+                    "raw_description": ev.get("info", ""),
+                    "source": "The Fillmore Charlotte",
+                })
+            except Exception as exc:
+                log.debug("Fillmore event error: %s", exc)
+    except Exception as exc:
+        log.error("Fillmore scrape failed: %s", exc)
+    return results
+
+
+def _scrape_snug(in_window) -> list[dict]:
+    results = []
+    try:
+        resp = requests.get(SNUG_URL, headers=HEADERS, timeout=20)
+        resp.raise_for_status()
+        soup = BeautifulSoup(resp.text, "lxml")
+
+        for card in soup.select(".event-listings .event, li.event, [class*='event-listing']"):
+            try:
+                title_el = card.select_one("strong, h3, .event-name, [class*='name']")
+                date_el = card.select_one("time, [datetime], [class*='date']")
+
+                title_text = title_el.get_text(strip=True) if title_el else ""
+                if not title_text:
+                    continue
+
+                date_attr = date_el.get("datetime", "") if date_el else ""
+                date_text = date_attr or (date_el.get_text(strip=True) if date_el else "")
+                try:
+                    event_date = dateparser.parse(date_text, fuzzy=True).date()
+                except Exception:
+                    continue
+
+                if not in_window(event_date):
+                    continue
+
+                results.append({
+                    "title": title_text[:100],
+                    "date": event_date.strftime("%Y-%m-%d"),
+                    "time": _extract_time(date_text),
+                    "venue": "Snug Harbor, Charlotte NC",
+                    "raw_description": "",
+                    "source": "Snug Harbor",
+                })
+            except Exception as exc:
+                log.debug("Snug Harbor event error: %s", exc)
+    except Exception as exc:
+        log.error("Snug Harbor scrape failed: %s", exc)
+    return results
+
+
+def _fmt_time(t: str) -> str:
+    if not t:
+        return "TBD"
+    try:
+        from datetime import datetime
+        return datetime.strptime(t, "%H:%M:%S").strftime("%I:%M %p")
+    except Exception:
+        return t
 
 
 def _extract_time(text: str) -> str:

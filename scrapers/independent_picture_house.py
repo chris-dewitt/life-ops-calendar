@@ -18,9 +18,9 @@ class IndependentPictureHouseScraper(BaseScraper):
         events: list[dict] = []
 
         with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True)
-            page = browser.new_page()
-            page.set_extra_http_headers({"User-Agent": "Mozilla/5.0 Chrome/120.0.0.0"})
+            browser = self._launch(p)
+            ctx = self._new_context(browser)
+            page = ctx.new_page()
 
             try:
                 page.goto(EVENTS_URL, timeout=30000)
@@ -38,7 +38,6 @@ class IndependentPictureHouseScraper(BaseScraper):
                         if not title_text or not date_text:
                             continue
 
-                        # Dates are "Apr 28" — infer the year
                         try:
                             parsed = dateparser.parse(date_text)
                             event_date = _infer_year(parsed)
@@ -71,7 +70,6 @@ class IndependentPictureHouseScraper(BaseScraper):
 
 
 def _infer_year(parsed: datetime) -> date:
-    """If parsed date is in the past, bump to next year."""
     today = date.today()
     d = parsed.date().replace(year=today.year)
     if d < today:

@@ -7,7 +7,8 @@ from playwright.sync_api import sync_playwright
 from .base import BaseScraper
 
 log = logging.getLogger(__name__)
-EVENTS_URL = "https://duboiscenter.charlotte.edu/events/"
+# UNC Charlotte's main events calendar — Dubois Center events appear here
+EVENTS_URL = "https://www.charlotte.edu/events/"
 
 
 class DuboisCenterScraper(BaseScraper):
@@ -17,31 +18,28 @@ class DuboisCenterScraper(BaseScraper):
         events: list[dict] = []
 
         with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True)
-            page = browser.new_page()
-            page.set_extra_http_headers({"User-Agent": "Mozilla/5.0 Chrome/120.0.0.0"})
+            browser = self._launch(p)
+            ctx = self._new_context(browser)
+            page = ctx.new_page()
 
             try:
                 page.goto(EVENTS_URL, timeout=30000)
-                page.wait_for_load_state("networkidle", timeout=20000)
+                page.wait_for_load_state("domcontentloaded", timeout=20000)
+                page.wait_for_timeout(2000)
 
-                cards = page.query_selector_all(
-                    ".tribe-event, article.type-tribe_events, .tribe-events-calendar-list__event"
-                )
-
-                for card in cards:
+                # UNC Charlotte events use a Localist calendar
+                for card in page.locator(".em-card, .event-card, article, [class*='event']").all():
                     try:
-                        title_el = card.query_selector("h2, h3, .tribe-event-title, .tribe-events-calendar-list__event-title")
-                        date_el = card.query_selector("time, .tribe-event-date-start, [class*='date']")
-                        venue_el = card.query_selector(".tribe-venue, [class*='venue'], [class*='location']")
-                        desc_el = card.query_selector("p, .tribe-event-description")
+                        title_el = card.locator("h2, h3, h4, [class*='title']").first
+                        date_el = card.locator("time, [class*='date'], [datetime]").first
+                        desc_el = card.locator("p, [class*='description']").first
 
-                        title_text = title_el.inner_text().strip() if title_el else ""
+                        title_text = title_el.inner_text().strip() if title_el.count() else ""
                         if not title_text:
                             continue
 
-                        date_attr = date_el.get_attribute("datetime") if date_el else ""
-                        date_text = date_attr or (date_el.inner_text() if date_el else "")
+                        date_attr = date_el.get_attribute("datetime") if date_el.count() else ""
+                        date_text = date_attr or (date_el.inner_text() if date_el.count() else "")
                         try:
                             event_date = dateparser.parse(date_text.strip()).date()
                         except Exception:
@@ -50,14 +48,13 @@ class DuboisCenterScraper(BaseScraper):
                         if not self._is_within_window(event_date):
                             continue
 
-                        venue_text = venue_el.inner_text().strip() if venue_el else "UNC Charlotte"
-                        desc_text = desc_el.inner_text().strip() if desc_el else ""
+                        desc_text = desc_el.inner_text().strip() if desc_el.count() else ""
 
                         events.append({
-                            "title": title_text,
+                            "title": title_text[:100],
                             "date": event_date.strftime("%Y-%m-%d"),
                             "time": _extract_time(date_text),
-                            "venue": venue_text,
+                            "venue": "UNC Charlotte / Dubois Center",
                             "raw_description": desc_text,
                             "source": self.SOURCE,
                         })

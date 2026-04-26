@@ -7,7 +7,6 @@ from playwright.sync_api import sync_playwright
 from .base import BaseScraper
 
 log = logging.getLogger(__name__)
-# Correct URL - waccharlotte.org does not resolve
 EVENTS_URL = "https://worldaffairscharlotte.org/events/"
 
 
@@ -18,49 +17,42 @@ class WorldAffairsCouncilScraper(BaseScraper):
         events: list[dict] = []
 
         with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True)
-            page = browser.new_page()
-            page.set_extra_http_headers({"User-Agent": "Mozilla/5.0 Chrome/120.0.0.0"})
+            browser = self._launch(p)
+            ctx = self._new_context(browser)
+            page = ctx.new_page()
 
             try:
                 page.goto(EVENTS_URL, timeout=30000)
-                page.wait_for_load_state("networkidle", timeout=20000)
-                page.wait_for_timeout(3000)  # EventOn plugin loads via AJAX
+                page.wait_for_load_state("domcontentloaded", timeout=20000)
+                # EventOn plugin loads events via AJAX — wait for cards to appear
+                try:
+                    page.wait_for_selector(".evcal_eventcard, .eventon_list_event", timeout=10000)
+                except Exception:
+                    pass
 
-                # EventOn plugin classes: .evcal_eventcard, .eventon_list_event
                 for card in page.locator(".evcal_eventcard, .eventon_list_event").all():
                     try:
-                        title_el = card.locator(".evcal_evdata_cell .evcal_event_title, .evo_event_title, h3, h4").first
-                        date_el = card.locator(".evcal_month_line, .evo_date, [class*='date'], time").first
-                        desc_el = card.locator(".evcal_desc, p").first
-
-                        title_text = title_el.inner_text().strip() if title_el.count() else ""
-                        if not title_text:
-                            # Fallback: grab all text and use first meaningful line
-                            all_text = card.inner_text().strip()
-                            lines = [l.strip() for l in all_text.split("\n") if l.strip()]
-                            title_text = lines[0] if lines else ""
-
-                        if not title_text:
+                        lines = [l.strip() for l in card.inner_text().split("\n") if l.strip()]
+                        if len(lines) < 2:
                             continue
 
-                        date_text = date_el.inner_text().strip() if date_el.count() else ""
+                        title_text = lines[0]
+                        date_text = " ".join(lines[1:3])
+
                         try:
-                            event_date = dateparser.parse(date_text).date()
+                            event_date = dateparser.parse(date_text, fuzzy=True).date()
                         except Exception:
                             continue
 
                         if not self._is_within_window(event_date):
                             continue
 
-                        desc_text = desc_el.inner_text().strip() if desc_el.count() else ""
-
                         events.append({
                             "title": title_text[:100],
                             "date": event_date.strftime("%Y-%m-%d"),
                             "time": _extract_time(date_text),
                             "venue": "World Affairs Council of Charlotte, UNC Charlotte",
-                            "raw_description": desc_text,
+                            "raw_description": " ".join(lines),
                             "source": self.SOURCE,
                         })
                     except Exception as exc:

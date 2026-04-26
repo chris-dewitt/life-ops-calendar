@@ -1,14 +1,23 @@
 import logging
 import re
 
+import requests
+from bs4 import BeautifulSoup
 from dateutil import parser as dateparser
-from playwright.sync_api import sync_playwright
 
 from .base import BaseScraper
 
 log = logging.getLogger(__name__)
-# RunSignup search for Charlotte-area races
-EVENTS_URL = "https://runsignup.com/Races/NC/Charlotte"
+
+# RunSignup's search page for Charlotte NC races — plain HTML, no JS required
+SEARCH_URL = "https://runsignup.com/Races/NC/Charlotte"
+HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+    ),
+    "Accept": "text/html,application/xhtml+xml",
+}
 
 
 class CharlotteRunningClubScraper(BaseScraper):
@@ -17,58 +26,46 @@ class CharlotteRunningClubScraper(BaseScraper):
     def scrape(self) -> list[dict]:
         events: list[dict] = []
 
-        with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True)
-            page = browser.new_page()
-            page.set_extra_http_headers({"User-Agent": "Mozilla/5.0 Chrome/120.0.0.0"})
+        try:
+            resp = requests.get(SEARCH_URL, headers=HEADERS, timeout=20)
+            resp.raise_for_status()
+            soup = BeautifulSoup(resp.text, "lxml")
 
-            try:
-                page.goto(EVENTS_URL, timeout=30000)
-                page.wait_for_load_state("networkidle", timeout=20000)
+            # RunSignup race cards in search results
+            for card in soup.select(".race-card, .race-result, [class*='race-row'], [class*='RaceRow']"):
+                try:
+                    title_el = card.select_one("h2, h3, h4, [class*='race-name'], [class*='RaceName']")
+                    date_el = card.select_one("[class*='date'], [class*='Date'], time")
 
-                cards = page.query_selector_all(
-                    ".race-card, .race-row, .search-result-item, [class*='race-']"
-                )
+                    title_text = title_el.get_text(strip=True) if title_el else ""
+                    if not title_text:
+                        continue
 
-                for card in cards:
+                    date_text = date_el.get_text(strip=True) if date_el else ""
                     try:
-                        title_el = card.query_selector("h2, h3, h4, .race-name, [class*='race-title']")
-                        date_el = card.query_selector("time, .race-date, [class*='date']")
-                        venue_el = card.query_selector(".race-location, [class*='location'], [class*='city']")
-                        desc_el = card.query_selector("p, .race-description")
+                        event_date = dateparser.parse(date_text, fuzzy=True).date()
+                    except Exception:
+                        continue
 
-                        title_text = title_el.inner_text().strip() if title_el else ""
-                        if not title_text:
-                            continue
+                    if not self._is_within_window(event_date):
+                        continue
 
-                        date_attr = date_el.get_attribute("datetime") if date_el else ""
-                        date_text = date_attr or (date_el.inner_text() if date_el else "")
-                        try:
-                            event_date = dateparser.parse(date_text.strip()).date()
-                        except Exception:
-                            continue
+                    location_el = card.select_one("[class*='location'], [class*='city'], [class*='venue']")
+                    venue = location_el.get_text(strip=True) if location_el else "Charlotte, NC"
 
-                        if not self._is_within_window(event_date):
-                            continue
+                    events.append({
+                        "title": title_text[:100],
+                        "date": event_date.strftime("%Y-%m-%d"),
+                        "time": _extract_time(date_text),
+                        "venue": venue[:80],
+                        "raw_description": "",
+                        "source": self.SOURCE,
+                    })
+                except Exception as exc:
+                    log.debug("Card parse error: %s", exc)
 
-                        venue_text = venue_el.inner_text().strip() if venue_el else "Charlotte, NC"
-                        desc_text = desc_el.inner_text().strip() if desc_el else ""
-
-                        events.append({
-                            "title": title_text,
-                            "date": event_date.strftime("%Y-%m-%d"),
-                            "time": _extract_time(date_text),
-                            "venue": venue_text,
-                            "raw_description": desc_text,
-                            "source": self.SOURCE,
-                        })
-                    except Exception as exc:
-                        log.debug("Card parse error: %s", exc)
-
-            except Exception as exc:
-                log.error("%s scrape failed: %s", self.SOURCE, exc)
-            finally:
-                browser.close()
+        except Exception as exc:
+            log.error("%s scrape failed: %s", self.SOURCE, exc)
 
         log.info("%s: found %d events", self.SOURCE, len(events))
         return events

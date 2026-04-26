@@ -18,9 +18,9 @@ class MiddleCJazzScraper(BaseScraper):
         events: list[dict] = []
 
         with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True)
-            page = browser.new_page()
-            page.set_extra_http_headers({"User-Agent": "Mozilla/5.0 Chrome/120.0.0.0"})
+            browser = self._launch(p)
+            ctx = self._new_context(browser)
+            page = ctx.new_page()
 
             try:
                 page.goto(EVENTS_URL, timeout=30000)
@@ -32,12 +32,10 @@ class MiddleCJazzScraper(BaseScraper):
                         if len(lines) < 2:
                             continue
 
-                        # Line 0: "SUN, APR 26, 2026"
-                        # Line 1: "TITLE IN CAPS"
-                        # Line 2: "Show 1pm | Doors 12:15pm"
+                        # Line 0: "SUN, APR 26, 2026"  Line 1: title  Line 2: "Show 1pm | Doors..."
                         date_text = lines[0]
                         title = lines[1].title()
-                        time_text = lines[2] if len(lines) > 2 else "TBD"
+                        time_text = lines[2] if len(lines) > 2 else ""
 
                         try:
                             event_date = dateparser.parse(date_text).date()
@@ -47,7 +45,6 @@ class MiddleCJazzScraper(BaseScraper):
                         if not self._is_within_window(event_date):
                             continue
 
-                        # Extract show time from "Show 1pm | Doors 12:15pm"
                         time_match = re.search(r"Show\s+(\d{1,2}(?::\d{2})?(?:am|pm))", time_text, re.I)
                         time_fmt = _normalize_time(time_match.group(1)) if time_match else "TBD"
 
@@ -72,7 +69,6 @@ class MiddleCJazzScraper(BaseScraper):
 
 
 def _normalize_time(t: str) -> str:
-    """Convert '1pm' or '7:30pm' to '01:00 PM' format."""
     try:
         return datetime.strptime(t.lower(), "%I:%M%p").strftime("%I:%M %p")
     except ValueError:
