@@ -1,0 +1,41 @@
+name: Life Ops Event Scraper
+
+on:
+  schedule:
+    - cron: "0 6 * * 1"   # Every Monday at 6:00 AM UTC
+  workflow_dispatch:        # Manual trigger for testing
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write       # Required to commit updated processed_events.json
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install Python dependencies
+        run: pip install -r requirements.txt
+
+      - name: Install Playwright + Chromium
+        run: playwright install chromium --with-deps
+
+      - name: Run scraper pipeline
+        env:
+          MACRODROID_WEBHOOK_URL: ${{ secrets.MACRODROID_WEBHOOK_URL }}
+        run: python main.py
+
+      - name: Commit updated event ledger
+        run: |
+          git config user.name "life-ops-bot"
+          git config user.email "bot@life-ops.local"
+          git add data/processed_events.json
+          git diff --staged --quiet || git commit -m "chore: update event ledger [skip ci]"
+          git push
