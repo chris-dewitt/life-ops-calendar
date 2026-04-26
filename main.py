@@ -39,6 +39,7 @@ def main() -> None:
             return
 
         # Dispatch first — only commit ledger on success so failed runs are retried
+        log.info("Dispatching %d new event(s) to MacroDroid...", len(new_events))
         dispatch(new_events)
         commit_ledger(new_hashes)
         log.info("Dispatch complete. Ledger updated with %d new hashes.", len(new_hashes))

@@ -1,29 +1,16 @@
 import logging
 import re
+from datetime import date
 
-import requests
-from bs4 import BeautifulSoup
 from dateutil import parser as dateparser
+from playwright.sync_api import sync_playwright
 
 from .base import BaseScraper
 
 log = logging.getLogger(__name__)
 
-# Eventbrite's public search API — no auth required, no bot detection
-EVENTBRITE_API = (
-    "https://www.eventbrite.com/api/v3/destination/search/"
-    "?q=makerspace+charlotte&place.address.city=Charlotte&place.address.region=NC"
-    "&expand=event_sales_status,primary_venue,image"
-)
-
-HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-    ),
-    "Accept": "application/json, text/plain, */*",
-    "Referer": "https://www.eventbrite.com/",
-}
+# Scrape their Eventbrite organizer page as HTML — no API key needed
+EVENTS_URL = "https://www.eventbrite.com/o/makerspace-charlotte-8173870117"
 
 
 class MakerSpaceScraper(BaseScraper):
@@ -32,59 +19,59 @@ class MakerSpaceScraper(BaseScraper):
     def scrape(self) -> list[dict]:
         events: list[dict] = []
 
-        try:
-            resp = requests.get(EVENTBRITE_API, headers=HEADERS, timeout=20)
-            resp.raise_for_status()
-            data = resp.json()
+        with sync_playwright() as p:
+            browser = self._launch(p)
+            ctx = self._new_context(browser)
+            page = ctx.new_page()
 
-            event_list = (
-                data.get("events", {}).get("results", [])
-                or data.get("results", [])
-                or []
-            )
+            try:
+                page.goto(EVENTS_URL, timeout=30000)
+                page.wait_for_load_state("domcontentloaded", timeout=20000)
+                page.wait_for_timeout(3000)
 
-            for ev in event_list:
-                try:
-                    title = ev.get("name", {}).get("text", "") or ev.get("name", "")
-                    if not title or "makerspace" not in title.lower():
-                        continue
-
-                    start = ev.get("start", {}).get("local", "") or ev.get("start_date", "")
+                for card in page.locator("[data-testid='event-card'], .eds-event-card, article[class*='event']").all():
                     try:
-                        event_date = dateparser.parse(start).date()
-                    except Exception:
-                        continue
+                        title_el = card.locator("h2, h3, [class*='title'], [class*='name']").first
+                        date_el = card.locator("time, [class*='date'], [class*='start']").first
 
-                    if not self._is_within_window(event_date):
-                        continue
+                        title_text = title_el.inner_text().strip() if title_el.count() else ""
+                        if not title_text:
+                            continue
 
-                    venue = ev.get("primary_venue", {}).get("address", {}).get("localized_address_display", "MakerSpace Charlotte")
-                    desc_html = ev.get("description", {}).get("html", "") or ""
-                    desc_text = BeautifulSoup(desc_html, "lxml").get_text()[:300]
+                        date_text = date_el.get_attribute("datetime") or date_el.inner_text().strip() if date_el.count() else ""
+                        if not date_text:
+                            continue
 
-                    events.append({
-                        "title": title[:100],
-                        "date": event_date.strftime("%Y-%m-%d"),
-                        "time": _extract_time(start),
-                        "venue": venue[:80] or "MakerSpace Charlotte, 1216 Thomas Ave",
-                        "raw_description": desc_text,
-                        "source": self.SOURCE,
-                    })
-                except Exception as exc:
-                    log.debug("Event parse error: %s", exc)
+                        try:
+                            event_date = dateparser.parse(date_text, fuzzy=True).date()
+                        except Exception:
+                            continue
 
-        except Exception as exc:
-            log.error("%s scrape failed: %s", self.SOURCE, exc)
+                        if not self._is_within_window(event_date):
+                            continue
+
+                        events.append({
+                            "title": title_text[:100],
+                            "date": event_date.strftime("%Y-%m-%d"),
+                            "time": _extract_time(date_text),
+                            "venue": "MakerSpace Charlotte, 1216 Thomas Ave, Charlotte NC",
+                            "raw_description": "",
+                            "source": self.SOURCE,
+                        })
+                    except Exception as exc:
+                        log.debug("Card parse error: %s", exc)
+
+            except Exception as exc:
+                log.error("%s scrape failed: %s", self.SOURCE, exc)
+            finally:
+                page.close()
+                ctx.close()
+                browser.close()
 
         log.info("%s: found %d events", self.SOURCE, len(events))
         return events
 
 
-def _extract_time(iso: str) -> str:
-    m = re.search(r"T(\d{2}):(\d{2})", iso)
-    if m:
-        h, mn = int(m.group(1)), int(m.group(2))
-        suffix = "AM" if h < 12 else "PM"
-        h12 = h % 12 or 12
-        return f"{h12:02d}:{mn:02d} {suffix}"
-    return "TBD"
+def _extract_time(text: str) -> str:
+    m = re.search(r"\d{1,2}:\d{2}\s*(?:AM|PM|am|pm)", text)
+    return m.group(0).upper() if m else "TBD"
