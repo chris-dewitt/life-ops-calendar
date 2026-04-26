@@ -1,5 +1,6 @@
 import logging
 import re
+from datetime import datetime
 
 from dateutil import parser as dateparser
 from playwright.sync_api import sync_playwright
@@ -25,38 +26,37 @@ class MiddleCJazzScraper(BaseScraper):
                 page.goto(EVENTS_URL, timeout=30000)
                 page.wait_for_load_state("networkidle", timeout=20000)
 
-                cards = page.query_selector_all(
-                    ".eventlist-event, .event-card, article, [class*='event-'], .sqs-block-content"
-                )
-
-                for card in cards:
+                for card in page.locator(".rhpSingleEvent").all():
                     try:
-                        title_el = card.query_selector("h2, h3, h4, .eventlist-title, [class*='title']")
-                        date_el = card.query_selector("time, .eventlist-datetag, [class*='date']")
-                        desc_el = card.query_selector("p, .eventlist-description")
-
-                        title_text = title_el.inner_text().strip() if title_el else ""
-                        if not title_text:
+                        lines = [l.strip() for l in card.inner_text().split("\n") if l.strip()]
+                        if len(lines) < 2:
                             continue
 
-                        date_attr = date_el.get_attribute("datetime") if date_el else ""
-                        date_text = date_attr or (date_el.inner_text() if date_el else "")
+                        # Line 0: "SUN, APR 26, 2026"
+                        # Line 1: "TITLE IN CAPS"
+                        # Line 2: "Show 1pm | Doors 12:15pm"
+                        date_text = lines[0]
+                        title = lines[1].title()
+                        time_text = lines[2] if len(lines) > 2 else "TBD"
+
                         try:
-                            event_date = dateparser.parse(date_text.strip()).date()
+                            event_date = dateparser.parse(date_text).date()
                         except Exception:
                             continue
 
                         if not self._is_within_window(event_date):
                             continue
 
-                        desc_text = desc_el.inner_text().strip() if desc_el else ""
+                        # Extract show time from "Show 1pm | Doors 12:15pm"
+                        time_match = re.search(r"Show\s+(\d{1,2}(?::\d{2})?(?:am|pm))", time_text, re.I)
+                        time_fmt = _normalize_time(time_match.group(1)) if time_match else "TBD"
 
                         events.append({
-                            "title": title_text,
+                            "title": title[:100],
                             "date": event_date.strftime("%Y-%m-%d"),
-                            "time": _extract_time(date_text),
+                            "time": time_fmt,
                             "venue": "Middle C Jazz, 300 W Tremont Ave, Charlotte NC",
-                            "raw_description": desc_text,
+                            "raw_description": time_text,
                             "source": self.SOURCE,
                         })
                     except Exception as exc:
@@ -71,6 +71,12 @@ class MiddleCJazzScraper(BaseScraper):
         return events
 
 
-def _extract_time(text: str) -> str:
-    m = re.search(r"\d{1,2}:\d{2}\s*(?:AM|PM|am|pm)", text)
-    return m.group(0).upper() if m else "TBD"
+def _normalize_time(t: str) -> str:
+    """Convert '1pm' or '7:30pm' to '01:00 PM' format."""
+    try:
+        return datetime.strptime(t.lower(), "%I:%M%p").strftime("%I:%M %p")
+    except ValueError:
+        try:
+            return datetime.strptime(t.lower(), "%I%p").strftime("%I:%M %p")
+        except ValueError:
+            return t.upper()

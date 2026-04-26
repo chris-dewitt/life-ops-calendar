@@ -1,6 +1,5 @@
 import logging
 import re
-from datetime import date
 
 from dateutil import parser as dateparser
 from playwright.sync_api import sync_playwright
@@ -8,7 +7,8 @@ from playwright.sync_api import sync_playwright
 from .base import BaseScraper
 
 log = logging.getLogger(__name__)
-EVENTS_URL = "https://www.waccharlotte.org/events"
+# Correct URL - waccharlotte.org does not resolve
+EVENTS_URL = "https://worldaffairscharlotte.org/events/"
 
 
 class WorldAffairsCouncilScraper(BaseScraper):
@@ -25,41 +25,41 @@ class WorldAffairsCouncilScraper(BaseScraper):
             try:
                 page.goto(EVENTS_URL, timeout=30000)
                 page.wait_for_load_state("networkidle", timeout=20000)
+                page.wait_for_timeout(3000)  # EventOn plugin loads via AJAX
 
-                # WAC uses a standard events listing; grab each event card
-                cards = page.query_selector_all(".eventlist-event, .event-item, article.event, .tribe-event")
-                if not cards:
-                    # Fallback: grab any heading + date pairs
-                    cards = page.query_selector_all("[class*='event']")
-
-                for card in cards:
+                # EventOn plugin classes: .evcal_eventcard, .eventon_list_event
+                for card in page.locator(".evcal_eventcard, .eventon_list_event").all():
                     try:
-                        title_el = card.query_selector("h2, h3, h4, .eventlist-title, .tribe-event-title")
-                        date_el = card.query_selector("time, .eventlist-datetag, .tribe-event-schedule-details, [class*='date']")
-                        venue_el = card.query_selector(".eventlist-venue, .tribe-venue, [class*='venue'], [class*='location']")
-                        desc_el = card.query_selector("p, .eventlist-description, .tribe-event-description")
+                        title_el = card.locator(".evcal_evdata_cell .evcal_event_title, .evo_event_title, h3, h4").first
+                        date_el = card.locator(".evcal_month_line, .evo_date, [class*='date'], time").first
+                        desc_el = card.locator(".evcal_desc, p").first
 
-                        title_text = title_el.inner_text().strip() if title_el else ""
+                        title_text = title_el.inner_text().strip() if title_el.count() else ""
+                        if not title_text:
+                            # Fallback: grab all text and use first meaningful line
+                            all_text = card.inner_text().strip()
+                            lines = [l.strip() for l in all_text.split("\n") if l.strip()]
+                            title_text = lines[0] if lines else ""
+
                         if not title_text:
                             continue
 
-                        date_text = date_el.get_attribute("datetime") or date_el.inner_text() if date_el else ""
+                        date_text = date_el.inner_text().strip() if date_el.count() else ""
                         try:
-                            event_date = dateparser.parse(date_text.strip()).date()
+                            event_date = dateparser.parse(date_text).date()
                         except Exception:
                             continue
 
                         if not self._is_within_window(event_date):
                             continue
 
-                        venue_text = venue_el.inner_text().strip() if venue_el else "Charlotte, NC"
-                        desc_text = desc_el.inner_text().strip() if desc_el else ""
+                        desc_text = desc_el.inner_text().strip() if desc_el.count() else ""
 
                         events.append({
-                            "title": title_text,
+                            "title": title_text[:100],
                             "date": event_date.strftime("%Y-%m-%d"),
                             "time": _extract_time(date_text),
-                            "venue": venue_text,
+                            "venue": "World Affairs Council of Charlotte, UNC Charlotte",
                             "raw_description": desc_text,
                             "source": self.SOURCE,
                         })
