@@ -3,6 +3,7 @@ import sys
 
 from pipeline.deduplicator import commit_ledger, filter_new
 from pipeline.dispatcher import dispatch, send_error
+from pipeline.filter import filter_interesting
 from pipeline.minimizer import minimize
 from scrapers import ALL_SCRAPERS
 
@@ -38,11 +39,19 @@ def main() -> None:
             log.info("No new events to dispatch.")
             return
 
-        # Dispatch first — only commit ledger on success so failed runs are retried
-        log.info("Dispatching %d new event(s) to MacroDroid...", len(new_events))
-        dispatch(new_events)
+        filtered = filter_interesting(new_events)
+        log.info("After interest filter: %d/%d events kept", len(filtered), len(new_events))
+
+        if filtered:
+            log.info("Dispatching %d event(s) to MacroDroid...", len(filtered))
+            dispatch(filtered)
+        else:
+            log.info("All events filtered out — nothing to dispatch.")
+
+        # Commit ledger AFTER successful dispatch so failed runs are retried.
+        # Includes filtered-out hashes so we don't re-evaluate them next run.
         commit_ledger(new_hashes)
-        log.info("Dispatch complete. Ledger updated with %d new hashes.", len(new_hashes))
+        log.info("Ledger updated with %d new hashes.", len(new_hashes))
 
     except Exception as exc:
         msg = f"Pipeline failed: {exc}. Check GitHub logs."

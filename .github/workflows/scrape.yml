@@ -30,6 +30,7 @@ jobs:
       - name: Run scraper pipeline
         env:
           MACRODROID_WEBHOOK_URL: ${{ secrets.MACRODROID_WEBHOOK_URL }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: python main.py
 
       - name: Commit updated event ledger
