@@ -18,7 +18,7 @@ VENUES = [
     },
     {
         "name": "Discovery Place Science",
-        "url": "https://visit.discoveryplace.org/science/events",
+        "url": "https://discoveryplace.org/things-to-do/events-calendar/",
         "address": "Discovery Place Science, 301 N Tryon St, Charlotte NC",
         "scraper": "discovery",
     },
@@ -102,10 +102,42 @@ def _scrape_mint(page, venue: dict, in_window) -> list[dict]:
 
 def _scrape_discovery(page, venue: dict, in_window) -> list[dict]:
     results = []
-    for item in page.locator(".event-listing-item").all():
+
+    # discoveryplace.org uses Tribe Events Calendar (same as Mint Museum)
+    # Try tribe selectors first, then fall back to generic article/li patterns.
+    SELECTORS = (
+        "article[class*='tribe'], "
+        ".tribe-events-calendar-list__event-article, "
+        ".tribe-event, "
+        # Legacy visit.discoveryplace.org ticketing platform selectors
+        ".event-listing-item, "
+        # Generic fallbacks
+        "article, li"
+    )
+
+    cards = page.locator(SELECTORS).filter(
+        has=page.locator("h2, h3, h4, [class*='title']")
+    ).all()
+
+    if not cards:
         try:
-            title_el = item.locator("h2.level-2, .title-link").first
-            date_el = item.locator(".event-date, time, [class*='date']").first
+            body = page.locator("body").inner_text()[:600].replace("\n", " ")
+            log.debug("Discovery Place page snapshot (no cards): %s", body)
+        except Exception:
+            pass
+
+    for item in cards:
+        try:
+            title_el = item.locator(
+                "h2, h3, h4, "
+                "[class*='title'], .tribe-event-url, "
+                "h2.level-2, .title-link"
+            ).first
+            date_el = item.locator(
+                "time[datetime], "
+                ".tribe-event-date-start, [class*='date'], "
+                ".event-date"
+            ).first
 
             title_text = title_el.inner_text().strip() if title_el.count() else ""
             if not title_text:
@@ -117,11 +149,15 @@ def _scrape_discovery(page, venue: dict, in_window) -> list[dict]:
             if not title_text:
                 continue
 
-            date_text = date_el.inner_text().strip() if date_el.count() else ""
+            date_attr = date_el.get_attribute("datetime") if date_el.count() else ""
+            date_text = date_attr or (
+                date_el.inner_text().strip() if date_el.count() else ""
+            )
             if not date_text:
                 continue
+
             try:
-                event_date = dateparser.parse(date_text).date()
+                event_date = dateparser.parse(date_text, fuzzy=True).date()
             except Exception:
                 continue
 
@@ -138,4 +174,5 @@ def _scrape_discovery(page, venue: dict, in_window) -> list[dict]:
             })
         except Exception as exc:
             log.debug("Discovery card error: %s", exc)
+
     return results

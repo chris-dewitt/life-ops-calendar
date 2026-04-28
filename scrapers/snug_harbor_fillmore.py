@@ -9,7 +9,7 @@ from .base import BaseScraper
 
 log = logging.getLogger(__name__)
 
-SNUG_URL = "https://www.snugharbor.com/events/"
+SNUG_URL = "https://snugrock.com/events/"
 FILLMORE_URL = "https://www.livenation.com/venue/KovZpZAEdFaA/the-fillmore-charlotte-events"
 
 

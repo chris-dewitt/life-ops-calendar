@@ -10,7 +10,7 @@ log = logging.getLogger(__name__)
 
 # Legistar web calendar — browser-based scraping avoids the WebAPI's
 # cloud-IP allowlist restriction while staying on the public page.
-CALENDAR_URL = "https://charlotte.legistar.com/Calendar.aspx"
+CALENDAR_URL = "https://charlottenc.legistar.com/Calendar.aspx"
 
 
 class CharlotteCityCouncilScraper(BaseScraper):

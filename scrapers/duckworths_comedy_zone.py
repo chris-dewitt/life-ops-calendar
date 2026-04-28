@@ -9,7 +9,9 @@ from .base import BaseScraper
 
 log = logging.getLogger(__name__)
 
-COMEDY_ZONE_URL = "https://thecomedyzone.com/charlotte-nc/"
+# Charlotte Comedy Zone has its own site — thecomedyzone.com is Greensboro
+COMEDY_ZONE_URL = "https://www.cltcomedyzone.com/calendar"
+VENUE_ADDR = "Comedy Zone Charlotte, 900 NC Music Factory Blvd, Charlotte NC"
 
 
 class DuckworthsComedyZoneScraper(BaseScraper):
@@ -31,19 +33,21 @@ class DuckworthsComedyZoneScraper(BaseScraper):
                     page.wait_for_load_state("domcontentloaded", timeout=10000)
                 page.wait_for_timeout(3000)
 
-                # 1. JSON-LD (Yoast SEO / schema markup present on many WP sites)
+                # 1. JSON-LD structured data (highest reliability)
                 events = _extract_jsonld(page, self._is_within_window)
                 if events:
                     log.info("%s: found %d events (JSON-LD)", self.SOURCE, len(events))
                     return events
 
-                # 2. CSS selectors: try Comedy Zone's known class patterns and
-                #    generic Lasso CRM / custom show-list patterns
+                # 2. CSS selectors: cltcomedyzone.com + common show-listing patterns
                 selectors = (
-                    ".show-item, .show-row, .lasso-loop-item, "
-                    ".shows-list li, .schedule-item, "
-                    ".show, .event, article, [class*='show-card'], "
-                    "[class*='event-card'], [class*='ShowCard']"
+                    # cltcomedyzone.com custom patterns
+                    ".show, .show-item, .show-card, .show-row, "
+                    # Generic comedy/venue CMS patterns
+                    ".event, .event-item, .event-card, "
+                    ".lasso-loop-item, .performance, "
+                    "article[class*='show'], article[class*='event'], "
+                    "li[class*='show'], li[class*='event']"
                 )
                 cards = page.locator(selectors).all()
 
@@ -58,15 +62,22 @@ class DuckworthsComedyZoneScraper(BaseScraper):
                                 "[class*='performer'], [class*='headliner']"
                             ).first
                             date_el = card.locator(
-                                "time, [class*='date'], [class*='Date'], [datetime]"
+                                "time[datetime], time, "
+                                "[class*='date'], [class*='Date']"
                             ).first
 
-                            title_text = title_el.inner_text().strip() if title_el.count() else ""
+                            title_text = (
+                                title_el.inner_text().strip() if title_el.count() else ""
+                            )
                             if not title_text:
                                 continue
 
-                            date_attr = date_el.get_attribute("datetime") if date_el.count() else ""
-                            date_text = date_attr or (date_el.inner_text().strip() if date_el.count() else "")
+                            date_attr = (
+                                date_el.get_attribute("datetime") if date_el.count() else ""
+                            )
+                            date_text = date_attr or (
+                                date_el.inner_text().strip() if date_el.count() else ""
+                            )
                             if not date_text:
                                 continue
 
@@ -82,7 +93,7 @@ class DuckworthsComedyZoneScraper(BaseScraper):
                                 "title": title_text[:100],
                                 "date": event_date.strftime("%Y-%m-%d"),
                                 "time": _extract_time(card.inner_text()),
-                                "venue": "Comedy Zone Charlotte, 900 NC Music Factory Blvd, Charlotte NC",
+                                "venue": VENUE_ADDR,
                                 "raw_description": "",
                                 "source": self.SOURCE,
                             })
@@ -107,7 +118,7 @@ def _extract_jsonld(page, in_window) -> list[dict]:
             data = json.loads(script.inner_text())
             items = data if isinstance(data, list) else [data]
             for item in items:
-                for entry in (item.get("@graph", []) or [item]):
+                for entry in item.get("@graph", []) or [item]:
                     if entry.get("@type", "") not in (
                         "Event", "MusicEvent", "ComedyEvent",
                         "TheaterEvent", "SocialEvent",
@@ -127,7 +138,7 @@ def _extract_jsonld(page, in_window) -> list[dict]:
                         "title": name[:100],
                         "date": event_date.strftime("%Y-%m-%d"),
                         "time": _extract_time(start),
-                        "venue": "Comedy Zone Charlotte, 900 NC Music Factory Blvd, Charlotte NC",
+                        "venue": VENUE_ADDR,
                         "raw_description": entry.get("description", "")[:200],
                         "source": "The Comedy Zone",
                     })
@@ -145,5 +156,5 @@ def _log_snapshot(page, label: str) -> None:
 
 
 def _extract_time(text: str) -> str:
-    m = re.search(r"\d{1,2}:\d{2}\s*(?:AM|PM|am|pm)", text)
+    m = re.search(r"\d{1,2}:\d{2}\s*(?:AM|PM|am|pm)", text, re.I)
     return m.group(0).upper() if m else "TBD"
