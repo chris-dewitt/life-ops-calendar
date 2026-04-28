@@ -10,6 +10,9 @@ from .base import BaseScraper
 log = logging.getLogger(__name__)
 EVENTS_URL = "https://www.middlecjazz.com/calendar"
 
+# Jazz clubs publish full seasons — cap to the next N shows to avoid flooding
+MAX_EVENTS = 5
+
 
 class MiddleCJazzScraper(BaseScraper):
     SOURCE = "Middle C Jazz"
@@ -28,7 +31,7 @@ class MiddleCJazzScraper(BaseScraper):
 
                 for card in page.locator(".rhpSingleEvent").all():
                     try:
-                        lines = [l.strip() for l in card.inner_text().split("\n") if l.strip()]
+                        lines = [ln.strip() for ln in card.inner_text().split("\n") if ln.strip()]
                         if len(lines) < 2:
                             continue
 
@@ -62,7 +65,13 @@ class MiddleCJazzScraper(BaseScraper):
             except Exception as exc:
                 log.error("%s scrape failed: %s", self.SOURCE, exc)
             finally:
+                page.close()
+                ctx.close()
                 browser.close()
+
+        # Sort by date and return only the next MAX_EVENTS shows
+        events.sort(key=lambda e: e["date"])
+        events = events[:MAX_EVENTS]
 
         log.info("%s: found %d events", self.SOURCE, len(events))
         return events

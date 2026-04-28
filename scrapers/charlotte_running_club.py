@@ -9,8 +9,8 @@ from .base import BaseScraper
 
 log = logging.getLogger(__name__)
 
-# Charlotte Running Club events page — JS-rendered
-EVENTS_URL = "https://charlotterunningclub.com/events/"
+# Wild Apricot site — correct domain per club website
+EVENTS_URL = "https://www.charlotterunningclub.org/events"
 
 
 class CharlotteRunningClubScraper(BaseScraper):
@@ -27,13 +27,18 @@ class CharlotteRunningClubScraper(BaseScraper):
             try:
                 page.goto(EVENTS_URL, timeout=30000)
                 page.wait_for_load_state("domcontentloaded", timeout=20000)
-                page.wait_for_timeout(3000)
+                page.wait_for_timeout(4000)
 
-                # Try generic event card selectors
+                # Wild Apricot event list selectors (v6/v7 themes)
                 cards = page.locator(
-                    "article, .event, .tribe-event, [class*='event-card'], "
-                    "[class*='EventCard'], li[class*='event']"
+                    ".eventlist-item, .event-row, "
+                    "article.event, [class*='WaEvent'], "
+                    "[class*='event-card'], li[class*='event']"
                 ).all()
+
+                if not cards:
+                    # Fallback: generic article/section with a time element
+                    cards = page.locator("article, section").filter(has=page.locator("time")).all()
 
                 for card in cards:
                     try:
@@ -41,8 +46,12 @@ class CharlotteRunningClubScraper(BaseScraper):
                         if not text or len(text) < 5:
                             continue
 
-                        title_el = card.locator("h2, h3, h4, [class*='title'], [class*='name']").first
-                        date_el = card.locator("time, [class*='date'], [datetime]").first
+                        title_el = card.locator(
+                            "h2, h3, h4, "
+                            "[class*='title'], [class*='name'], "
+                            "[class*='EventName'], [class*='event-title']"
+                        ).first
+                        date_el = card.locator("time, [class*='date'], [datetime], [class*='Date']").first
 
                         title_text = title_el.inner_text().strip() if title_el.count() else ""
                         if not title_text:

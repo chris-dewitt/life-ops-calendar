@@ -9,6 +9,14 @@ from .base import BaseScraper
 log = logging.getLogger(__name__)
 EVENTS_URL = "https://worldaffairscharlotte.org/events/"
 
+# EventOn (evcal) and The Events Calendar (tribe) are the two most common WP calendar plugins
+_CARD_SEL = (
+    ".evcal_eventcard, .eventon_list_event, "
+    ".tribe-event-calendar-month__calendar-event, .tribe-events-calendar-list__event-article, "
+    "article.tribe_events_cat, .tribe_events_cat"
+)
+_FALLBACK_SEL = "article, .event, [class*='event-card'], [class*='EventCard']"
+
 
 class WorldAffairsCouncilScraper(BaseScraper):
     SOURCE = "World Affairs Council of Charlotte"
@@ -23,21 +31,32 @@ class WorldAffairsCouncilScraper(BaseScraper):
 
             try:
                 page.goto(EVENTS_URL, timeout=30000)
-                page.wait_for_load_state("domcontentloaded", timeout=20000)
-                # EventOn plugin loads events via AJAX — wait for cards to appear
+                # networkidle ensures AJAX calendar requests finish
                 try:
-                    page.wait_for_selector(".evcal_eventcard, .eventon_list_event", timeout=10000)
+                    page.wait_for_load_state("networkidle", timeout=20000)
                 except Exception:
-                    pass
+                    page.wait_for_load_state("domcontentloaded", timeout=10000)
 
-                for card in page.locator(".evcal_eventcard, .eventon_list_event").all():
+                # Give JS calendar extra time to render
+                try:
+                    page.wait_for_selector(_CARD_SEL, timeout=15000)
+                except Exception:
+                    log.debug("Primary selectors not found, trying fallback")
+
+                cards = page.locator(_CARD_SEL).all()
+                if not cards:
+                    cards = page.locator(_FALLBACK_SEL).filter(
+                        has=page.locator("time, [class*='date'], [class*='Date']")
+                    ).all()
+
+                for card in cards:
                     try:
-                        lines = [l.strip() for l in card.inner_text().split("\n") if l.strip()]
+                        lines = [ln.strip() for ln in card.inner_text().split("\n") if ln.strip()]
                         if len(lines) < 2:
                             continue
 
                         title_text = lines[0]
-                        date_text = " ".join(lines[1:3])
+                        date_text = " ".join(lines[1:4])
 
                         try:
                             event_date = dateparser.parse(date_text, fuzzy=True).date()
@@ -51,7 +70,7 @@ class WorldAffairsCouncilScraper(BaseScraper):
                             "title": title_text[:100],
                             "date": event_date.strftime("%Y-%m-%d"),
                             "time": _extract_time(date_text),
-                            "venue": "World Affairs Council of Charlotte, UNC Charlotte",
+                            "venue": "World Affairs Council of Charlotte",
                             "raw_description": " ".join(lines),
                             "source": self.SOURCE,
                         })
@@ -61,6 +80,8 @@ class WorldAffairsCouncilScraper(BaseScraper):
             except Exception as exc:
                 log.error("%s scrape failed: %s", self.SOURCE, exc)
             finally:
+                page.close()
+                ctx.close()
                 browser.close()
 
         log.info("%s: found %d events", self.SOURCE, len(events))
