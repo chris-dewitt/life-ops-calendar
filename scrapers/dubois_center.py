@@ -7,8 +7,9 @@ from playwright.sync_api import sync_playwright
 from .base import BaseScraper
 
 log = logging.getLogger(__name__)
-# UNC Charlotte's main events calendar — Dubois Center events appear here
-EVENTS_URL = "https://www.charlotte.edu/events/"
+
+# UNC Charlotte runs Localist at events.charlotte.edu; Dubois Center events appear there
+EVENTS_URL = "https://events.charlotte.edu/"
 
 
 class DuboisCenterScraper(BaseScraper):
@@ -24,22 +25,44 @@ class DuboisCenterScraper(BaseScraper):
 
             try:
                 page.goto(EVENTS_URL, timeout=30000)
-                page.wait_for_load_state("domcontentloaded", timeout=20000)
-                page.wait_for_timeout(2000)
+                # Localist renders its event list via JS — wait for networkidle
+                try:
+                    page.wait_for_load_state("networkidle", timeout=20000)
+                except Exception:
+                    page.wait_for_load_state("domcontentloaded", timeout=10000)
+                page.wait_for_timeout(3000)
 
-                # UNC Charlotte events use a Localist calendar
-                for card in page.locator(".em-card, .event-card, article, [class*='event']").all():
+                # Localist event card selectors (v4/v5)
+                try:
+                    page.wait_for_selector(".em-card, .lc-event-card", timeout=10000)
+                except Exception:
+                    pass
+
+                cards = page.locator(".em-card, .lc-event-card").all()
+                if not cards:
+                    # Fallback: any article/li that contains a time element
+                    cards = page.locator("article, li").filter(
+                        has=page.locator("time[datetime]")
+                    ).all()
+
+                for card in cards:
                     try:
-                        title_el = card.locator("h2, h3, h4, [class*='title']").first
-                        date_el = card.locator("time, [class*='date'], [datetime]").first
-                        desc_el = card.locator("p, [class*='description']").first
+                        title_el = card.locator(
+                            "h3, h2, h4, "
+                            ".em-card-title, .lc-event-card-title, [class*='title']"
+                        ).first
+                        date_el = card.locator("time[datetime], .em-date-badge, [class*='date']").first
+                        desc_el = card.locator("p, .em-card-description, [class*='description']").first
 
                         title_text = title_el.inner_text().strip() if title_el.count() else ""
                         if not title_text:
                             continue
 
                         date_attr = date_el.get_attribute("datetime") if date_el.count() else ""
-                        date_text = date_attr or (date_el.inner_text() if date_el.count() else "")
+                        date_text = date_attr or (date_el.inner_text().strip() if date_el.count() else "")
+                        if not date_text:
+                            continue
+
                         try:
                             event_date = dateparser.parse(date_text.strip()).date()
                         except Exception:
@@ -64,6 +87,8 @@ class DuboisCenterScraper(BaseScraper):
             except Exception as exc:
                 log.error("%s scrape failed: %s", self.SOURCE, exc)
             finally:
+                page.close()
+                ctx.close()
                 browser.close()
 
         log.info("%s: found %d events", self.SOURCE, len(events))
