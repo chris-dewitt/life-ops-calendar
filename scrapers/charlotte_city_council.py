@@ -8,8 +8,9 @@ from .base import BaseScraper
 
 log = logging.getLogger(__name__)
 
-# Legistar WebAPI — no auth required for public calendar data
-# OData endpoint: https://webapi.legistar.com/v1/charlotte/Events
+# Legistar WebAPI — public, no auth required
+# Avoid server-side OData date filters (some Legistar instances return 500);
+# instead fetch the next N events sorted by date and filter client-side.
 LEGISTAR_API = "https://webapi.legistar.com/v1/charlotte/Events"
 
 
@@ -18,17 +19,11 @@ class CharlotteCityCouncilScraper(BaseScraper):
 
     def scrape(self) -> list[dict]:
         events: list[dict] = []
-        today = date.today()
-        end = today + timedelta(days=self.DATE_WINDOW_DAYS)
         headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0"}
 
         params = {
-            "$filter": (
-                f"EventDate ge datetime'{today.isoformat()}T00:00:00' and "
-                f"EventDate le datetime'{end.isoformat()}T00:00:00'"
-            ),
             "$orderby": "EventDate asc",
-            "$top": "50",
+            "$top": "100",
         }
 
         try:

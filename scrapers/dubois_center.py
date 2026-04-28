@@ -45,6 +45,9 @@ class DuboisCenterScraper(BaseScraper):
                         has=page.locator("time[datetime]")
                     ).all()
 
+                if not cards:
+                    _log_snapshot(page, self.SOURCE)
+
                 for card in cards:
                     try:
                         title_el = card.locator(
@@ -93,6 +96,14 @@ class DuboisCenterScraper(BaseScraper):
 
         log.info("%s: found %d events", self.SOURCE, len(events))
         return events
+
+
+def _log_snapshot(page, label: str) -> None:
+    try:
+        text = page.locator("body").inner_text()[:600].replace("\n", " ")
+        log.debug("%s page snapshot (no cards found): %s", label, text)
+    except Exception:
+        pass
 
 
 def _extract_time(text: str) -> str:
