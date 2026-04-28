@@ -1,17 +1,16 @@
 import logging
-from datetime import date, timedelta
+import re
 
-import requests
 from dateutil import parser as dateparser
+from playwright.sync_api import sync_playwright
 
 from .base import BaseScraper
 
 log = logging.getLogger(__name__)
 
-# Legistar WebAPI — public, no auth required
-# Avoid server-side OData date filters (some Legistar instances return 500);
-# instead fetch the next N events sorted by date and filter client-side.
-LEGISTAR_API = "https://webapi.legistar.com/v1/charlotte/Events"
+# Legistar web calendar — browser-based scraping avoids the WebAPI's
+# cloud-IP allowlist restriction while staying on the public page.
+CALENDAR_URL = "https://charlotte.legistar.com/Calendar.aspx"
 
 
 class CharlotteCityCouncilScraper(BaseScraper):
@@ -19,44 +18,94 @@ class CharlotteCityCouncilScraper(BaseScraper):
 
     def scrape(self) -> list[dict]:
         events: list[dict] = []
-        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0"}
 
-        params = {
-            "$orderby": "EventDate asc",
-            "$top": "100",
-        }
+        with sync_playwright() as p:
+            browser = self._launch(p)
+            ctx = self._new_context(browser)
+            page = ctx.new_page()
 
-        try:
-            resp = requests.get(LEGISTAR_API, params=params, headers=headers, timeout=20)
-            resp.raise_for_status()
-            for item in resp.json():
-                title = item.get("EventBodyName", "").strip()
-                if not title:
-                    continue
-
-                raw_date = item.get("EventDate", "")
-                raw_time = item.get("EventTime", "") or "TBD"
-                location = item.get("EventLocation", "") or "Charlotte City Hall, 600 East 4th Street"
-
+            try:
+                page.goto(CALENDAR_URL, timeout=30000)
                 try:
-                    event_date = dateparser.parse(raw_date).date()
+                    page.wait_for_load_state("networkidle", timeout=20000)
                 except Exception:
-                    continue
+                    page.wait_for_load_state("domcontentloaded", timeout=10000)
 
-                if not self._is_within_window(event_date):
-                    continue
+                # Legistar uses a Telerik RadGrid; rows carry class rgRow / rgAltRow
+                try:
+                    page.wait_for_selector("tr.rgRow, tr.rgAltRow", timeout=15000)
+                except Exception:
+                    _log_snapshot(page, self.SOURCE)
 
-                events.append({
-                    "title": title,
-                    "date": event_date.strftime("%Y-%m-%d"),
-                    "time": raw_time,
-                    "venue": location,
-                    "raw_description": title,
-                    "source": self.SOURCE,
-                })
+                rows = page.locator("tr.rgRow, tr.rgAltRow").all()
 
-        except Exception as exc:
-            log.error("%s scrape failed: %s", self.SOURCE, exc)
+                if not rows:
+                    # Generic fallback: any <tr> inside a <table> with ≥3 cells
+                    rows = page.locator("table tbody tr").filter(
+                        has=page.locator("td:nth-child(3)")
+                    ).all()
+
+                for row in rows:
+                    try:
+                        cells = row.locator("td").all()
+                        if len(cells) < 2:
+                            continue
+
+                        # Legistar RadGrid column order:
+                        # 0: Name/Body  1: Date  2: Time  3: Location  (4+: extras)
+                        title = cells[0].inner_text().strip()
+                        date_text = cells[1].inner_text().strip() if len(cells) > 1 else ""
+                        time_text = cells[2].inner_text().strip() if len(cells) > 2 else "TBD"
+                        location = cells[3].inner_text().strip() if len(cells) > 3 else "Charlotte City Hall"
+
+                        if not title or not date_text:
+                            continue
+
+                        try:
+                            event_date = dateparser.parse(date_text, fuzzy=True).date()
+                        except Exception:
+                            continue
+
+                        if not self._is_within_window(event_date):
+                            continue
+
+                        time_fmt = _clean_time(time_text)
+
+                        events.append({
+                            "title": title[:100],
+                            "date": event_date.strftime("%Y-%m-%d"),
+                            "time": time_fmt,
+                            "venue": location or "Charlotte City Hall, 600 E 4th St",
+                            "raw_description": title,
+                            "source": self.SOURCE,
+                        })
+                    except Exception as exc:
+                        log.debug("Row parse error: %s", exc)
+
+            except Exception as exc:
+                log.error("%s scrape failed: %s", self.SOURCE, exc)
+            finally:
+                page.close()
+                ctx.close()
+                browser.close()
 
         log.info("%s: found %d events", self.SOURCE, len(events))
         return events
+
+
+def _log_snapshot(page, label: str) -> None:
+    try:
+        text = page.locator("body").inner_text()[:600].replace("\n", " ")
+        log.debug("%s page snapshot (no rows found): %s", label, text)
+    except Exception:
+        pass
+
+
+def _clean_time(raw: str) -> str:
+    m = re.search(r"\d{1,2}:\d{2}\s*(?:AM|PM|am|pm)", raw)
+    if m:
+        return m.group(0).upper()
+    m = re.search(r"\d{1,2}\s*(?:AM|PM|am|pm)", raw)
+    if m:
+        return m.group(0).upper()
+    return raw.strip() or "TBD"
