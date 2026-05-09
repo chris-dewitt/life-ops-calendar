@@ -7,8 +7,11 @@ import requests
 
 log = logging.getLogger(__name__)
 
-MODEL = "gemma-3-27b-it"
-API_URL = f"https://generativelanguage.googleapis.com/v1beta/models/{MODEL}:generateContent"
+# Override at runtime with the GEMINI_MODEL env var if you want to A/B another model.
+# The previous default (`gemma-3-27b-it`) started returning 404 on the v1beta endpoint, so
+# we default to a currently-supported Gemini Flash model that's available on the free tier.
+DEFAULT_MODEL = "gemini-2.5-flash"
+API_BASE = "https://generativelanguage.googleapis.com/v1beta/models"
 
 INTERESTS = """YES — keep these:
 - Live music: indie, blues, funk, electronic, country, alternative, punk
@@ -60,6 +63,9 @@ def filter_interesting(events: list[dict]) -> list[dict]:
         log.warning("GEMINI_API_KEY not set — passing all %d events through unfiltered", len(events))
         return events
 
+    model = os.environ.get("GEMINI_MODEL", DEFAULT_MODEL)
+    api_url = f"{API_BASE}/{model}:generateContent"
+
     formatted = "\n".join(
         f"{i}. title: {e.get('title','?')} | when: {e.get('date','?')} {e.get('time','?')} | "
         f"venue: {e.get('venue','')[:60]} | summary: {e.get('summary','')[:200]}"
@@ -69,18 +75,18 @@ def filter_interesting(events: list[dict]) -> list[dict]:
 
     body = {
         "contents": [{"parts": [{"text": prompt}]}],
-        "generationConfig": {"temperature": 0.0},
+        "generationConfig": {"temperature": 0.0, "responseMimeType": "application/json"},
     }
 
     try:
-        resp = requests.post(f"{API_URL}?key={api_key}", json=body, timeout=120)
+        resp = requests.post(f"{api_url}?key={api_key}", json=body, timeout=120)
         resp.raise_for_status()
         text = resp.json()["candidates"][0]["content"]["parts"][0]["text"]
         decisions = _extract_json(text)
         keep = {d["n"] for d in decisions if d.get("keep")}
         kept = [e for i, e in enumerate(events, 1) if i in keep]
-        log.info("Gemma filter: kept %d/%d events", len(kept), len(events))
+        log.info("LLM filter (%s): kept %d/%d events", model, len(kept), len(events))
         return kept
     except Exception as exc:
-        log.error("Gemma filter failed: %s — passing all events through", exc)
+        log.error("LLM filter (%s) failed: %s — passing all events through", model, exc)
         return events
